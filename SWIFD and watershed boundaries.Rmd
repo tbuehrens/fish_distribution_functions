@@ -15,7 +15,7 @@ This script uses JSON to download SWFID (WDFW fish distribution from salmonscape
 
 Load Packages
 ```{r }
-pacman ::p_load(jsonlite, dplyr, RODBC, curl,odbc,DBI,tidyverse,janitor,fuzzyjoin,ggplot2,lubridate,kableExtra,sf,rnaturalearth,ggmap,httr,here)
+pacman ::p_load(jsonlite, dplyr, RODBC, curl,odbc,DBI,tidyverse,janitor,fuzzyjoin,ggplot2,lubridate,kableExtra,sf,rnaturalearth,ggmap,httr,here,units)
 ```
 
 
@@ -59,7 +59,8 @@ sf_swifd <- st_sf(
   # set coordinate reference system (CRS) - replace EPSG:4326 with the appropriate CRS
   crs = st_crs(4326)
 )%>%
-  setNames(gsub("attributes\\.", "", colnames(.)))
+  setNames(gsub("attributes\\.", "", colnames(.)))%>%
+  st_set_crs(st_crs("+proj=longlat +datum=WGS84 +units=m"))
 
 p1<-ggplot() +
   geom_sf(data = sf_swifd,color="blue")
@@ -84,10 +85,11 @@ query_params <- list(
 )
 response <- httr::GET(base_url, query = query_params)
 json_data <- httr::content(response, "text")
-sf_wbd<-geojsonsf::geojson_sf(json_data)
+sf_wbd<-geojsonsf::geojson_sf(json_data)%>%
+  st_set_crs(st_crs(sf_swifd))
 ```
 
-Dissolving HUC 12s by HUC10s and filtering (example: coastal steelhead pops...find HUC 10's for each pop):
+Dissolving HUC 12s by HUC10s and filtering to create pop polygons (example: coastal steelhead pops...find HUC 10's for each pop):
 https://apps.nationalmap.gov/viewer/
 ```{r}
 
@@ -104,24 +106,31 @@ sf_pops<-sf_wbd%>%
   mutate(population = ifelse(str_detect(HUC12, paste0('^', paste(quillayute_huc10, collapse = '|'))),"quillayute",NA),
          population = ifelse(str_detect(HUC12, paste0('^', paste(hoh_huc10, collapse = '|'))),"hoh",population),
          population = ifelse(str_detect(HUC12, paste0('^', paste(queets_huc10, collapse = '|'))),"queets",population),
-         population = ifelse(str_detect(HUC12, paste0('^', paste(quinault_huc10, collapse = '|'))),"quinualt",population),
+         population = ifelse(str_detect(HUC12, paste0('^', paste(quinault_huc10, collapse = '|'))),"quinault",population),
          population = ifelse(str_detect(HUC12, paste0('^', paste(humptulips_huc10, collapse = '|'))),"humptulips",population),
          population = ifelse(str_detect(HUC12, paste0('^', paste(chehalis_huc8, collapse = '|'))),"chehalis",population),
          )%>%
   filter(!is.na(population))%>%
   group_by(population)%>%
   summarise()
+  
 ```
 
 Spatially joining dissolved watersheds (SASI pops!) to SWIFD data
 ```{r}
-sf_swifd_pops<-sf_swifd%>%
-  st_join(sf_pops)%>%
-  filter(!is.na(population))%>%
-  group_by(population,DISTTYPE_DESC)%>%
-  summarise(length=sum(`Shape.STLength()`))
+sf_swifd_pops <- sf_swifd %>%
+  #st_join(sf_pops)%>%
+  st_intersection(sf_pops)%>%
+  filter(!is.na(population) 
+         & !DISTTYPE_DESC %in% c("Gradient Accessible", "Potential","Historic - Documented","Artificial - Potential","Transported - Potential","Modeled")
+         )%>%
+  group_by(population)%>%
+  summarise()%>%
+  mutate(length = st_length(geometry))%>%
+  mutate(length_km = set_units(length, km))%>%
+  dplyr::select(-length)
+  
 ```
-
 
 Plotting Results
 ```{r}
@@ -131,22 +140,13 @@ state_map <- ne_states (country = 'United States of America', returnclass = 'sf'
 p1<-ggplot() +
   geom_sf(data = state_map, color = "black",fill = "lightgrey") + # Washington state map
   geom_sf(data = sf_pops, color = "black",fill = NA)+  # Washington state map  
-  geom_sf(data = sf_swifd_pops%>%
-            filter(!DISTTYPE_DESC %in% c("Gradient Accessible", "Potential","Historic - Documented","Artificial - Potential","Transported - Potential","Modeled"))
-          ,aes(color=as.factor(DISTTYPE_DESC)))
+  geom_sf(data = sf_swifd_pops,aes(color=as.factor(population)))
+  #ylim(46.8,48)+
+  #xlim(124.5,123.7)
 
 print(p1)
 
-
-sf_swifd %>%
-  st_join(sf_pops) %>%
-  filter(!is.na(population)) %>%
-  filter(!DISTTYPE_DESC %in% c("Gradient Accessible", "Potential", "Historic - Documented", "Artificial - Potential", "Transported - Potential", "Modeled")) %>%
-  group_by(population) %>%
-  summarise(length = sum(`Shape.STLength()`)) %>%
-  ungroup() %>%
-  mutate(length_miles = length / 5280) %>%
-  dplyr::select(-length)%>%
+sf_swifd_pops%>%
   st_drop_geometry()%>%
   kbl()
 ```
