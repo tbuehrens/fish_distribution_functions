@@ -97,7 +97,7 @@ hoh_huc10<-c('1710010107')
 queets_huc10<-c('1710010201','1710010202')
 quinault_huc10<-c('1710010204','1710010205')
 humptulips_huc10<-c('1710010501')
-chehalis_huc8<-c('17100104','17100103')
+chehalis_huc8<-c('17100104','17100103','1710010502')
 
 
 sf_pops<-sf_wbd%>%
@@ -136,5 +136,18 @@ p1<-ggplot() +
           ,aes(color=as.factor(DISTTYPE_DESC)))
 
 print(p1)
+
+
+sf_swifd %>%
+  st_join(sf_pops) %>%
+  filter(!is.na(population)) %>%
+  filter(!DISTTYPE_DESC %in% c("Gradient Accessible", "Potential", "Historic - Documented", "Artificial - Potential", "Transported - Potential", "Modeled")) %>%
+  group_by(population) %>%
+  summarise(length = sum(`Shape.STLength()`)) %>%
+  ungroup() %>%
+  mutate(length_miles = length / 5280) %>%
+  dplyr::select(-length)%>%
+  st_drop_geometry()%>%
+  kbl()
 ```
 
