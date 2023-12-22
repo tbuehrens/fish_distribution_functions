@@ -1,0 +1,153 @@
+---
+title: "swift d and watershed boundary data"
+author: "thomas buehrens"
+date: "2023-12-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+This script uses JSON to download SWFID (WDFW fish distribution from salmonscape) data (including geometry) from data.wa.gov using a REST API. It also downloads HUC12 watershed boundary polygons using a REST API from data.wa.gov. It allows one to dissolve HUC12s by HUC 10 codes, spatially join them to SWIFD data and dissolve SWIFD data by these new "watersheds". This is helpful for getting distribution layers, watershed polygons, and available habitat lengths by SASI pop. It implements this for steelhead in some coastal watersheds.
+
+
+Load Packages
+```{r }
+pacman ::p_load(jsonlite, dplyr, RODBC, curl,odbc,DBI,tidyverse,janitor,fuzzyjoin,ggplot2,lubridate,kableExtra,sf,rnaturalearth,ggmap,httr,here)
+```
+
+
+JSON download of SWIFD data and convert to SF object (note this is done in batches because the API is set up to have max record count)
+```{r}
+url <- "https://geodataservices.wdfw.wa.gov/arcgis/rest/services/MapServices/SWIFD/MapServer/0/query"
+total_records = 100000
+batch_size = 1000
+dat <- data.frame()
+
+for (offset in seq(0, total_records, by = batch_size)) {
+  query_params <- list(
+    where = paste0("SPECIES = 'STEELHEAD TROUT' 
+                   AND OBJECTID > ", offset, " AND OBJECTID <= ", offset + batch_size,
+                   "AND RUNTIME_DESC = 'Winter'"
+                   ),
+    outFields = "*",
+    outSR = 4326,
+    f = "json"
+  )
+  response <- GET(url, query = query_params)
+  json_data <- content(response, "text")
+  # Parse and process the JSON data
+  parsed_data <- fromJSON(json_data)
+  # Convert the parsed data to a data frame
+  batch_data <- as.data.frame(parsed_data$features)
+  # Append the batch to the overall data frame
+  dat <- bind_rows(dat, batch_data)
+}
+
+# Assuming all_data is your list with attributes and geometry
+# Extract paths from the geometry list
+paths <- lapply(dat$geometry$paths, function(path) st_linestring(matrix(as.numeric(path), ncol = 2, byrow = F)))
+
+# Create an sf object
+sf_swifd <- st_sf(
+  # attributes
+  attributes = dat$attributes,
+  # geometry
+  geometry = st_sfc(paths),
+  # set coordinate reference system (CRS) - replace EPSG:4326 with the appropriate CRS
+  crs = st_crs(4326)
+)%>%
+  setNames(gsub("attributes\\.", "", colnames(.)))
+
+p1<-ggplot() +
+  geom_sf(data = sf_swifd,color="blue")
+
+print(p1)
+
+```
+
+
+JSON download of watershed boundary data (HUC12) and convert to SF object
+```{r}
+base_url<-"https://geodataservices.wdfw.wa.gov/arcgis/rest/services/ApplicationServices/FP_HUC/MapServer/0/query"
+query_params <- list(
+  where = paste0(
+  "
+   huc12 LIKE '171001%' 
+  "
+  ),
+  outFields = '*',
+  outSR = 4326,
+  f = "geojson"
+)
+response <- httr::GET(base_url, query = query_params)
+json_data <- httr::content(response, "text")
+sf_wbd<-geojsonsf::geojson_sf(json_data)
+```
+
+Dissolving HUC 12s by HUC10s and filtering (example: coastal steelhead pops...find HUC 10's for each pop):
+https://apps.nationalmap.gov/viewer/
+```{r}
+
+
+quillayute_huc10<-c('1710010103','1710010104','1710010105','1710010106')
+hoh_huc10<-c('1710010107')
+queets_huc10<-c('1710010201','1710010202')
+quinault_huc10<-c('1710010204','1710010205')
+humptulips_huc10<-c('1710010501')
+chehalis_huc8<-c('17100104','17100103','1710010502')
+
+
+sf_pops<-sf_wbd%>%
+  mutate(population = ifelse(str_detect(HUC12, paste0('^', paste(quillayute_huc10, collapse = '|'))),"quillayute",NA),
+         population = ifelse(str_detect(HUC12, paste0('^', paste(hoh_huc10, collapse = '|'))),"hoh",population),
+         population = ifelse(str_detect(HUC12, paste0('^', paste(queets_huc10, collapse = '|'))),"queets",population),
+         population = ifelse(str_detect(HUC12, paste0('^', paste(quinault_huc10, collapse = '|'))),"quinualt",population),
+         population = ifelse(str_detect(HUC12, paste0('^', paste(humptulips_huc10, collapse = '|'))),"humptulips",population),
+         population = ifelse(str_detect(HUC12, paste0('^', paste(chehalis_huc8, collapse = '|'))),"chehalis",population),
+         )%>%
+  filter(!is.na(population))%>%
+  group_by(population)%>%
+  summarise()
+```
+
+Spatially joining dissolved watersheds (SASI pops!) to SWIFD data
+```{r}
+sf_swifd_pops<-sf_swifd%>%
+  st_join(sf_pops)%>%
+  filter(!is.na(population))%>%
+  group_by(population,DISTTYPE_DESC)%>%
+  summarise(length=sum(`Shape.STLength()`))
+```
+
+
+Plotting Results
+```{r}
+state_map <- ne_states (country = 'United States of America', returnclass = 'sf')%>% 
+  filter (name %in% c('Washington'))
+
+p1<-ggplot() +
+  geom_sf(data = state_map, color = "black",fill = "lightgrey") + # Washington state map
+  geom_sf(data = sf_pops, color = "black",fill = NA)+  # Washington state map  
+  geom_sf(data = sf_swifd_pops%>%
+            filter(!DISTTYPE_DESC %in% c("Gradient Accessible", "Potential","Historic - Documented","Artificial - Potential","Transported - Potential","Modeled"))
+          ,aes(color=as.factor(DISTTYPE_DESC)))
+
+print(p1)
+
+
+sf_swifd %>%
+  st_join(sf_pops) %>%
+  filter(!is.na(population)) %>%
+  filter(!DISTTYPE_DESC %in% c("Gradient Accessible", "Potential", "Historic - Documented", "Artificial - Potential", "Transported - Potential", "Modeled")) %>%
+  group_by(population) %>%
+  summarise(length = sum(`Shape.STLength()`)) %>%
+  ungroup() %>%
+  mutate(length_miles = length / 5280) %>%
+  dplyr::select(-length)%>%
+  st_drop_geometry()%>%
+  kbl()
+```
+
