@@ -19,7 +19,7 @@ pacman ::p_load(jsonlite, dplyr, RODBC, curl,odbc,DBI,tidyverse,janitor,fuzzyjoi
 ```
 
 
-JSON download of SWIFD data and convert to SF object
+JSON download of SWIFD data and convert to SF object (note this is done in batches because the API is set up to have max record count)
 ```{r}
 url <- "https://geodataservices.wdfw.wa.gov/arcgis/rest/services/MapServices/SWIFD/MapServer/0/query"
 total_records = 100000
@@ -60,6 +60,12 @@ sf_swifd <- st_sf(
   crs = st_crs(4326)
 )%>%
   setNames(gsub("attributes\\.", "", colnames(.)))
+
+p1<-ggplot() +
+  geom_sf(data = sf_swifd,color="blue")
+
+print(p1)
+
 ```
 
 
@@ -81,17 +87,26 @@ json_data <- httr::content(response, "text")
 sf_wbd<-geojsonsf::geojson_sf(json_data)
 ```
 
-Dissolving HUC 12s by HUC10s and filtering
+Dissolving HUC 12s by HUC10s and filtering (example: coastal steelhead pops...find HUC 10's for each pop):
+https://apps.nationalmap.gov/viewer/
 ```{r}
+
+
 quillayute_huc10<-c('1710010103','1710010104','1710010105','1710010106')
 hoh_huc10<-c('1710010107')
 queets_huc10<-c('1710010201','1710010202')
 quinault_huc10<-c('1710010204','1710010205')
+humptulips_huc10<-c('1710010501')
+chehalis_huc8<-c('17100104','17100103')
+
+
 sf_pops<-sf_wbd%>%
   mutate(population = ifelse(str_detect(HUC12, paste0('^', paste(quillayute_huc10, collapse = '|'))),"quillayute",NA),
          population = ifelse(str_detect(HUC12, paste0('^', paste(hoh_huc10, collapse = '|'))),"hoh",population),
          population = ifelse(str_detect(HUC12, paste0('^', paste(queets_huc10, collapse = '|'))),"queets",population),
          population = ifelse(str_detect(HUC12, paste0('^', paste(quinault_huc10, collapse = '|'))),"quinualt",population),
+         population = ifelse(str_detect(HUC12, paste0('^', paste(humptulips_huc10, collapse = '|'))),"humptulips",population),
+         population = ifelse(str_detect(HUC12, paste0('^', paste(chehalis_huc8, collapse = '|'))),"chehalis",population),
          )%>%
   filter(!is.na(population))%>%
   group_by(population)%>%
@@ -103,7 +118,7 @@ Spatially joining dissolved watersheds (SASI pops!) to SWIFD data
 sf_swifd_pops<-sf_swifd%>%
   st_join(sf_pops)%>%
   filter(!is.na(population))%>%
-  group_by(population)%>%
+  group_by(population,DISTTYPE_DESC)%>%
   summarise(length=sum(`Shape.STLength()`))
 ```
 
@@ -116,7 +131,9 @@ state_map <- ne_states (country = 'United States of America', returnclass = 'sf'
 p1<-ggplot() +
   geom_sf(data = state_map, color = "black",fill = "lightgrey") + # Washington state map
   geom_sf(data = sf_pops, color = "black",fill = NA)+  # Washington state map  
-  geom_sf(data = sf_swifd_pops,color="blue")
+  geom_sf(data = sf_swifd_pops%>%
+            filter(!DISTTYPE_DESC %in% c("Gradient Accessible", "Potential","Historic - Documented","Artificial - Potential","Transported - Potential","Modeled"))
+          ,aes(color=as.factor(DISTTYPE_DESC)))
 
 print(p1)
 ```
